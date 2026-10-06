@@ -1,0 +1,68 @@
+name: Обновление данных
+
+on:
+  schedule:
+    - cron: "25 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update-data
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 20
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.x"
+
+      - name: Meta Ads
+        id: meta
+        continue-on-error: true
+        env:
+          META_TOKEN: ${{ secrets.META_TOKEN }}
+          META_APP_SECRET: ${{ secrets.META_APP_SECRET }}
+          META_OWNER_USER_ID: ${{ vars.META_OWNER_USER_ID }}
+        run: node scripts/meta.mjs
+
+      - name: Google Ads
+        id: google
+        continue-on-error: true
+        env:
+          GOOGLE_SHEET_CSV_URL: ${{ secrets.GOOGLE_SHEET_CSV_URL }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GOOGLE_SHEET_CSV_URL}" ]; then echo "::error::GOOGLE_SHEET_CSV_URL не задан"; exit 1; fi
+          curl -fsSL --retry 3 --retry-delay 10 -o "$RUNNER_TEMP/google.csv" "$GOOGLE_SHEET_CSV_URL" \
+            || { echo "::error::Не удалось скачать CSV Google-таблицы"; exit 1; }
+          python scripts/google_csv_to_json.py "$RUNNER_TEMP/google.csv" data/google.json
+
+      - name: Коммит данных
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/*.json
+          if git diff --cached --quiet; then
+            echo "Данные не изменились"
+          else
+            git commit -q -m "data: update"
+            git pull -q --rebase origin main
+            git push -q origin HEAD:main
+          fi
+
+      - name: Проверка источников
+        if: steps.meta.outcome == 'failure' || steps.google.outcome == 'failure'
+        run: |
+          echo "::error::Meta: ${{ steps.meta.outcome }}, Google: ${{ steps.google.outcome }} — подробности в шагах выше"
+          exit 1
